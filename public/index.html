@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Video Call App</title>
+    <!-- Use minified versions of libraries for production -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.min.js"></script>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        background-color: #f0f0f0;
+      }
+      #user-list {
+        list-style-type: none;
+        padding: 0;
+        margin: 20px 0;
+        width: 200px;
+        border: 1px solid #ccc;
+        border-radius: 5px;
+        background-color: #fff;
+      }
+      #user-list li {
+        cursor: pointer;
+        padding: 10px;
+        margin: 5px 0;
+        background-color: #eee;
+        text-align: center;
+        border-bottom: 1px solid #ddd;
+      }
+      #user-list li:hover {
+        background-color: #ccc;
+      }
+      video {
+        width: 45%;
+        margin: 10px;
+        border: 1px solid #ddd;
+      }
+      #controls {
+        margin: 20px 0;
+        display: flex;
+        justify-content: space-around;
+        width: 100%;
+        max-width: 600px;
+      }
+      #controls button {
+        padding: 10px 20px;
+        font-size: 16px;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Video Call App</h1>
+    <div>
+      <h2>Online Users</h2>
+      <ul id="user-list"></ul>
+    </div>
+    <div>
+      <video id="localVideo" autoplay playsinline></video>
+      <video id="remoteVideo" autoplay playsinline></video>
+    </div>
+    <div id="controls">
+      <button id="end-call">End Call</button>
+      <button id="share-screen">Share Screen</button>
+    </div>
+    <script>
+      const socket = io();
+      let localStream;
+      let remoteStream;
+      let peerConnection;
+      let callTo;
+      const userList = document.getElementById("user-list");
+      const localVideo = document.getElementById("localVideo");
+      const remoteVideo = document.getElementById("remoteVideo");
+      const endCallButton = document.getElementById("end-call");
+      const shareScreenButton = document.getElementById("share-screen");
+      const iceServers = {
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      };
+
+      socket.on("update-user-list", (users) => {
+        userList.innerHTML = "";
+        users.forEach((id) => {
+          if (id !== socket.id) {
+            const userItem = document.createElement("li");
+            userItem.textContent = id;
+            userItem.onclick = () => requestCall(id);
+            userList.appendChild(userItem);
+          }
+        });
+      });
+
+      async function getMedia() {
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: true,
+          });
+          localVideo.srcObject = localStream;
+        } catch (error) {
+          alert(
+            "Error accessing media devices. Please check your permissions."
+          );
+          console.error("Error accessing media devices.", error);
+        }
+      }
+
+      function createPeerConnection() {
+        peerConnection = new RTCPeerConnection(iceServers);
+        peerConnection.onicecandidate = ({ candidate }) => {
+          if (candidate) {
+            socket.emit("webrtc-ice-candidate", callTo, candidate);
+          }
+        };
+        peerConnection.ontrack = (event) => {
+          remoteVideo.srcObject = event.streams[0];
+        };
+        localStream.getTracks().forEach((track) => {
+          peerConnection.addTrack(track, localStream);
+        });
+      }
+
+      function requestCall(id) {
+        callTo = id;
+        createPeerConnection();
+        peerConnection
+          .createOffer()
+          .then((offer) => {
+            return peerConnection.setLocalDescription(offer);
+          })
+          .then(() => {
+            socket.emit("webrtc-offer", id, peerConnection.localDescription);
+          })
+          .catch((error) => {
+            alert("Error initiating call.");
+            console.error("Error creating offer.", error);
+          });
+      }
+
+      socket.on("request-call", (fromId) => {
+        const accept = confirm(`Accept call from ${fromId}?`);
+        if (accept) {
+          callTo = fromId;
+          createPeerConnection();
+          socket.emit("accept-call", fromId);
+        } else {
+          socket.emit("reject-call", fromId);
+        }
+      });
+
+      socket.on("accept-call", (fromId) => {
+        callTo = fromId;
+      });
+
+      socket.on("reject-call", (fromId) => {
+        alert(`Call rejected by ${fromId}`);
+        endCall();
+      });
+
+      socket.on("webrtc-offer", (fromId, offer) => {
+        callTo = fromId;
+        createPeerConnection();
+        peerConnection
+          .setRemoteDescription(new RTCSessionDescription(offer))
+          .then(() => peerConnection.createAnswer())
+          .then((answer) => {
+            return peerConnection.setLocalDescription(answer);
+          })
+          .then(() => {
+            socket.emit(
+              "webrtc-answer",
+              fromId,
+              peerConnection.localDescription
+            );
+          })
+          .catch((error) => {
+            alert("Error responding to call.");
+            console.error("Error creating answer.", error);
+          });
+      });
+
+      socket.on("webrtc-answer", (fromId, answer) => {
+        peerConnection
+          .setRemoteDescription(new RTCSessionDescription(answer))
+          .catch((error) => {
+            console.error("Error setting remote description.", error);
+          });
+      });
+
+      socket.on("webrtc-ice-candidate", (fromId, candidate) => {
+        peerConnection
+          .addIceCandidate(new RTCIceCandidate(candidate))
+          .catch((error) => {
+            console.error("Error adding ICE candidate.", error);
+          });
+      });
+
+      endCallButton.addEventListener("click", endCall);
+
+      function endCall() {
+        if (peerConnection) {
+          peerConnection.close();
+          peerConnection = null;
+          remoteVideo.srcObject = null;
+        }
+        socket.emit("end-call", callTo);
+      }
+
+      shareScreenButton.addEventListener("click", async () => {
+        try {
+          const screenStream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+          });
+          const screenTrack = screenStream.getTracks()[0];
+          screenTrack.onended = () => {
+            // Stop sharing screen
+            localStream.getTracks().forEach((track) => {
+              peerConnection.addTrack(track, localStream);
+            });
+            localVideo.srcObject = localStream;
+          };
+          peerConnection.getSenders().forEach((sender) => {
+            if (sender.track.kind === "video") {
+              sender.replaceTrack(screenTrack);
+            }
+          });
+          localVideo.srcObject = screenStream;
+        } catch (error) {
+          alert("Error sharing screen.");
+          console.error("Error sharing screen.", error);
+        }
+      });
+
+      socket.on("end-call", () => {
+        endCall();
+        alert("Call ended by the other user.");
+      });
+
+      getMedia();
+    </script>
+  </body>
+</html>
